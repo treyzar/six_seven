@@ -1,11 +1,15 @@
 import cv2
 import mediapipe as mp
 import numpy as np
+import os
+from pathlib import Path
+import urllib.request
 
 BaseOptions = mp.tasks.BaseOptions
 HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
+MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
 
 # Создаем лэндмаркер с коллбэком
 class HandTracker:
@@ -17,8 +21,10 @@ class HandTracker:
             self.last_results["landmarks"] = result.hand_landmarks if result.hand_landmarks else []
             self.last_results["handedness"] = result.handedness if result.handedness else []
         
+        model_path = self._resolve_model_path()
+
         options = HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path='/tmp/hand_landmarker.task'),
+            base_options=BaseOptions(model_asset_path=model_path),
             running_mode=VisionRunningMode.LIVE_STREAM,
             num_hands=2,
             min_hand_detection_confidence=0.7,
@@ -26,6 +32,37 @@ class HandTracker:
             result_callback=result_callback
         )
         self.landmarker = HandLandmarker.create_from_options(options)
+
+    def _resolve_model_path(self):
+        # Приоритет: переменная окружения, затем файл рядом со скриптом, затем системные временные папки.
+        env_path = os.environ.get("HAND_LANDMARKER_MODEL")
+        local_model_path = Path(__file__).resolve().parent / "hand_landmarker.task"
+        candidates = [
+            env_path,
+            str(local_model_path),
+            "/tmp/hand_landmarker.task",
+            r"C:\tmp\hand_landmarker.task",
+        ]
+
+        for path in candidates:
+            if path and Path(path).is_file():
+                return path
+
+        # Для удобства первого запуска пробуем автоматически скачать модель.
+        try:
+            print("Файл модели не найден. Скачиваю hand_landmarker.task...")
+            urllib.request.urlretrieve(MODEL_URL, str(local_model_path))
+            if local_model_path.is_file():
+                print(f"Модель сохранена: {local_model_path}")
+                return str(local_model_path)
+        except Exception:
+            pass
+
+        raise FileNotFoundError(
+            "Не найден файл модели hand_landmarker.task.\n"
+            "Автозагрузка не удалась. Положите файл в папку проекта (рядом с hand_tracker.py) "
+            "или задайте переменную HAND_LANDMARKER_MODEL с полным путем."
+        )
     
     def create_particles(self, x, y, color):
         for _ in range(5):
