@@ -29,8 +29,8 @@ class HandTracker:
         self.vertical_ratio_threshold = 0.13
         self.combo_rule_text = "Need both hands"
         self.combo_rule_ok = False
-        self.upper_level_ratio = 0.32
-        self.lower_level_ratio = 0.68
+        self.upper_level_ratio = 0.40
+        self.lower_level_ratio = 0.60
         self.trigger_cooldown_sec = 0.4
         self.last_trigger_time = 0.0
         self.combo_trigger_armed = True
