@@ -21,13 +21,21 @@ class HandTracker:
         self.flash_alpha = 0.0
         self.combo = 0
         self.best_combo = 0
-        self.combo_step_sec = 0.9
-        self.combo_grace_sec = 0.35
-        self.combo_hold_start = None
+        self.combo_grace_sec = 1.0
         self.last_pair_seen = 0.0
-        self.combo_progress = 0.0
+        self.combo_progress = 1.0
         self.streak_text = ""
         self.streak_text_until = 0.0
+        self.vertical_ratio_threshold = 0.13
+        self.combo_rule_text = "Need both hands"
+        self.combo_rule_ok = False
+        self.upper_level_ratio = 0.32
+        self.lower_level_ratio = 0.68
+        self.trigger_cooldown_sec = 0.4
+        self.last_trigger_time = 0.0
+        self.combo_trigger_armed = True
+        self.easter_67_done = False
+        self.confetti_banner_until = 0.0
         self.last_results = {"landmarks": None, "handedness": None}
         
         def result_callback(result, output_image, timestamp_ms):
@@ -91,7 +99,52 @@ class HandTracker:
                 thickness = max(1, i // 4 + 1)
                 cv2.line(overlay, trail[i - 1], trail[i], color, thickness)
 
-    def _register_combo_hit(self, now, left_center, right_center):
+    def _analyze_hand_stack(self, palm_centers, frame_h):
+        left_y = palm_centers["Left"][1]
+        right_y = palm_centers["Right"][1]
+        threshold = max(35, int(frame_h * self.vertical_ratio_threshold))
+        delta = left_y - right_y
+
+        upper_line = int(frame_h * self.upper_level_ratio)
+        lower_line = int(frame_h * self.lower_level_ratio)
+
+        left_up_right_down = left_y <= upper_line and right_y >= lower_line and delta < -threshold
+        right_up_left_down = right_y <= upper_line and left_y >= lower_line and delta > threshold
+
+        if left_up_right_down:
+            return "L_UP_R_DOWN", True, "Touch OK: Left up + Right down", upper_line, lower_line
+        if right_up_left_down:
+            return "R_UP_L_DOWN", True, "Touch OK: Right up + Left down", upper_line, lower_line
+        return "NO_TOUCH", False, "Touch levels: one hand to TOP, other to BOTTOM", upper_line, lower_line
+
+    def _spawn_confetti(self, frame_w, frame_h):
+        colors = [
+            (255, 90, 90),
+            (90, 255, 120),
+            (90, 170, 255),
+            (255, 220, 90),
+            (255, 110, 220),
+            (120, 255, 255),
+        ]
+        center_x = frame_w // 2
+        center_y = frame_h // 2
+
+        for _ in range(520):
+            angle = np.random.uniform(0, 2 * np.pi)
+            speed = np.random.uniform(2.0, 8.5)
+            color = colors[np.random.randint(0, len(colors))]
+            self.particles.append({
+                'x': center_x + np.random.randint(-80, 80),
+                'y': center_y + np.random.randint(-50, 50),
+                'vx': np.cos(angle) * speed,
+                'vy': np.sin(angle) * speed,
+                'life': np.random.randint(40, 95),
+                'gravity': 0.08,
+                'size': np.random.randint(2, 5),
+                'color': color,
+            })
+
+    def _register_combo_hit(self, now, left_center, right_center, frame_w, frame_h):
         self.combo += 1
         self.best_combo = max(self.best_combo, self.combo)
         self.flash_alpha = 0.24
@@ -119,6 +172,14 @@ class HandTracker:
                 'life': 34,
                 'color': burst_color
             })
+
+        if self.combo == 67 and not self.easter_67_done:
+            self.easter_67_done = True
+            self.confetti_banner_until = now + 3.0
+            self.streak_text = "67! CONFETTI BLAST!"
+            self.streak_text_until = now + 2.8
+            self.flash_alpha = 0.5
+            self._spawn_confetti(frame_w, frame_h)
 
     def _draw_combo_hud(self, frame):
         cv2.putText(
@@ -149,13 +210,34 @@ class HandTracker:
 
         cv2.putText(
             frame,
-            "Hold both hands (6 + 7) to build combo",
+            "Combo rule: touch TOP + BOTTOM levels (no hold)",
             (20, 125),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             (235, 235, 235),
             2,
         )
+
+        cv2.putText(
+            frame,
+            self.combo_rule_text,
+            (20, 152),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (120, 255, 120) if self.combo_rule_ok else (120, 170, 255),
+            2,
+        )
+
+    def _draw_touch_levels(self, overlay):
+        h, w = overlay.shape[:2]
+        upper_y = int(h * self.upper_level_ratio)
+        lower_y = int(h * self.lower_level_ratio)
+        line_color = (140, 220, 255)
+
+        cv2.line(overlay, (0, upper_y), (w, upper_y), line_color, 2)
+        cv2.line(overlay, (0, lower_y), (w, lower_y), line_color, 2)
+        cv2.putText(overlay, "TOP", (20, max(30, upper_y - 10)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, line_color, 2)
+        cv2.putText(overlay, "BOTTOM", (20, min(h - 12, lower_y + 22)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, line_color, 2)
 
     def _apply_super_overlay(self, overlay, now):
         pulse = 0.5 + 0.5 * np.sin(now * 10.0)
@@ -253,6 +335,8 @@ class HandTracker:
                     if np.random.random() > 0.7:
                         self.create_particles(palm_x, palm_y, color)
 
+            self._draw_touch_levels(overlay)
+
             if "Left" not in detected_hands:
                 self.motion_trails["Left"].clear()
             if "Right" not in detected_hands:
@@ -260,21 +344,28 @@ class HandTracker:
 
             pair_active = "Left" in detected_hands and "Right" in detected_hands
             if pair_active:
+                _, stack_valid, stack_text, _, _ = self._analyze_hand_stack(palm_centers, frame.shape[0])
+                self.combo_rule_ok = stack_valid
+                self.combo_rule_text = stack_text
                 self.last_pair_seen = now
-                if self.combo_hold_start is None:
-                    self.combo_hold_start = now
+                cooldown_left = max(0.0, self.trigger_cooldown_sec - (now - self.last_trigger_time))
+                self.combo_progress = 1.0 - min(1.0, cooldown_left / self.trigger_cooldown_sec)
+
+                if stack_valid and self.combo_trigger_armed and cooldown_left <= 0:
+                    self._register_combo_hit(now, palm_centers["Left"], palm_centers["Right"], frame.shape[1], frame.shape[0])
+                    self.last_trigger_time = now
+                    self.combo_trigger_armed = False
                     self.combo_progress = 0.0
-                elapsed = now - self.combo_hold_start
-                while elapsed >= self.combo_step_sec:
-                    self.combo_hold_start += self.combo_step_sec
-                    elapsed = now - self.combo_hold_start
-                    self._register_combo_hit(now, palm_centers["Left"], palm_centers["Right"])
-                self.combo_progress = min(1.0, elapsed / self.combo_step_sec)
+                elif not stack_valid:
+                    self.combo_trigger_armed = True
             else:
+                self.combo_rule_ok = False
+                self.combo_rule_text = "Need both hands for analyzer"
+                self.combo_trigger_armed = True
+                self.combo_progress = 1.0
                 if now - self.last_pair_seen > self.combo_grace_sec:
                     self.combo = 0
-                    self.combo_hold_start = None
-                    self.combo_progress = 0.0
+                    self.combo_progress = 1.0
 
             combo_visual_mode = self.combo >= 2
             if combo_visual_mode:
@@ -284,10 +375,11 @@ class HandTracker:
             for particle in self.particles[:]:
                 particle['x'] += particle['vx']
                 particle['y'] += particle['vy']
+                particle['vy'] += particle.get('gravity', 0.0)
                 particle['life'] -= 1
                 
                 if particle['life'] > 0:
-                    size = max(1, particle['life'] // 6)
+                    size = particle.get('size', max(1, particle['life'] // 6))
                     cv2.circle(overlay, (int(particle['x']), int(particle['y'])), size, particle['color'], -1)
                 else:
                     self.particles.remove(particle)
@@ -304,6 +396,9 @@ class HandTracker:
             if now < self.streak_text_until:
                 self.draw_glowing_text(frame, self.streak_text, (frame.shape[1] // 2 - 240, 150), (120, 255, 255))
 
+            if now < self.confetti_banner_until:
+                self.draw_glowing_text(frame, "EASTER EGG 67!", (frame.shape[1] // 2 - 300, frame.shape[0] - 80), (255, 220, 120))
+
             cv2.putText(
                 frame,
                 "q: exit | r: reset combo",
@@ -319,8 +414,8 @@ class HandTracker:
             key = cv2.waitKey(1) & 0xFF
             if key == ord('r'):
                 self.combo = 0
-                self.combo_hold_start = None
-                self.combo_progress = 0.0
+                self.combo_progress = 1.0
+                self.combo_trigger_armed = True
                 self.streak_text = "RESET"
                 self.streak_text_until = now + 0.8
             elif key == ord('q'):
